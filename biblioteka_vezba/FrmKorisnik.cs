@@ -14,6 +14,7 @@ namespace biblioteka_vezba
         private DataGridView dgvKnjige;
         private DataGridView dgvMoje;
         private RoundedButton btnPozajmi;
+        private RoundedButton btnVrati;
         private RoundedButton btnOdjava;
 
         private bool _gotovo = false;
@@ -190,7 +191,7 @@ namespace biblioteka_vezba
             dgvKnjige.DefaultCellStyle.SelectionForeColor = Color.White;
             dgvKnjige.RowTemplate.Height = 34;
 
-            // dugmad pri dnu
+            // dugmad pri dnu: Pozajmi (levo), Vrati (sredina), Odjava (desno)
             btnPozajmi = new RoundedButton
             {
                 Text = "Pozajmi knjigu",
@@ -199,10 +200,23 @@ namespace biblioteka_vezba
                 FillColor = Navy,
                 HoverColor = Color.FromArgb(35, 60, 105),
                 Location = new Point(18, 600),
-                Size = new Size(250, 56),
+                Size = new Size(240, 56),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Left
             };
             btnPozajmi.Click += btnPozajmi_Click;
+
+            btnVrati = new RoundedButton
+            {
+                Text = "Vrati knjigu",
+                Font = new Font("Segoe UI", 14f, FontStyle.Bold),
+                ForeColor = Navy,
+                FillColor = Zlatna,
+                HoverColor = Color.FromArgb(214, 168, 86),
+                Location = new Point(274, 600),
+                Size = new Size(240, 56),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left
+            };
+            btnVrati.Click += btnVrati_Click;
 
             btnOdjava = new RoundedButton
             {
@@ -223,6 +237,7 @@ namespace biblioteka_vezba
             pnlGlavni.Controls.Add(pnlFilter);
             pnlGlavni.Controls.Add(dgvKnjige);
             pnlGlavni.Controls.Add(btnPozajmi);
+            pnlGlavni.Controls.Add(btnVrati);
             pnlGlavni.Controls.Add(btnOdjava);
 
             DodajMojePozajmice(pnlGlavni);
@@ -344,7 +359,7 @@ namespace biblioteka_vezba
         private void UcitajMoje()
         {
             string sql = @"
-                SELECT k.naslov AS Naslov, k.autor AS Autor,
+                SELECT p.id, k.naslov AS Naslov, k.autor AS Autor,
                        p.datum_pozajmice AS Pozajmljeno, p.rok_vracanja AS Rok,
                        DATEDIFF(p.rok_vracanja, CURDATE()) AS Preostalo
                 FROM pozajmice p
@@ -364,6 +379,7 @@ namespace biblioteka_vezba
 
                 dgvMoje.DataSource = dt;
 
+                dgvMoje.Columns["id"].Visible = false;
                 dgvMoje.Columns["Pozajmljeno"].DefaultCellStyle.Format = "dd.MM.yyyy";
                 dgvMoje.Columns["Rok"].DefaultCellStyle.Format = "dd.MM.yyyy";
                 dgvMoje.Columns["Rok"].HeaderText = "Rok vraćanja";
@@ -427,6 +443,52 @@ namespace biblioteka_vezba
                     MessageBox.Show("Knjiga više nije dostupna ili je već imaš pozajmljenu.");
                 else
                     MessageBox.Show("Pozajmljeno. Rok za vraćanje je 14 dana.");
+
+                UcitajKnjige();
+                UcitajMoje();
+            }
+            catch (MySqlException ex)
+            {
+                MessageBox.Show("Greška sa bazom: " + ex.Message);
+            }
+        }
+
+        private void btnVrati_Click(object sender, EventArgs e)
+        {
+            if (dgvMoje.CurrentRow == null)
+            {
+                MessageBox.Show("Izaberi knjigu iz tabele „Moje pozajmice“.");
+                return;
+            }
+
+            int pozajmicaId = Convert.ToInt32(dgvMoje.CurrentRow.Cells["id"].Value);
+            string naslov = dgvMoje.CurrentRow.Cells["Naslov"].Value.ToString();
+
+            var odgovor = MessageBox.Show(
+                "Da li želiš da vratiš knjigu „" + naslov + "“?",
+                "Vraćanje knjige", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (odgovor != DialogResult.Yes) return;
+
+            // pozajmica ostaje u bazi kao istorija, samo dobija datum vracanja
+            string sql = @"UPDATE pozajmice SET datum_vracanja = CURDATE()
+                           WHERE id = @id AND korisnik_id = @korisnik AND datum_vracanja IS NULL";
+
+            try
+            {
+                int izmenjeno;
+                using (var conn = new MySqlConnection(Db.ConnStr))
+                using (var cmd = new MySqlCommand(sql, conn))
+                {
+                    cmd.Parameters.AddWithValue("@id", pozajmicaId);
+                    cmd.Parameters.AddWithValue("@korisnik", Sesija.Id);
+                    conn.Open();
+                    izmenjeno = cmd.ExecuteNonQuery();
+                }
+
+                if (izmenjeno == 0)
+                    MessageBox.Show("Ova knjiga je već vraćena.");
+                else
+                    MessageBox.Show("Knjiga je vraćena.");
 
                 UcitajKnjige();
                 UcitajMoje();
