@@ -1,6 +1,6 @@
 ﻿namespace biblioteka_vezba
 {
-    partial class LoginForm
+    partial class FrmLogin
     {
         /// <summary>
         /// Required designer variable.

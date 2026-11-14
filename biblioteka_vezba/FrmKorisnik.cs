@@ -8,6 +8,9 @@ namespace biblioteka_vezba
 {
     public partial class FrmKorisnik : Form
     {
+        // koliko kasnjenja je dovoljno da se pozajmljivanje blokira
+        public const int MaxKasnjenja = 5;
+
         private Label lblDobrodosli;
         private TextBox txtPretraga;
         private ComboBox cmbKategorija;
@@ -46,7 +49,7 @@ namespace biblioteka_vezba
             _gotovo = true;
 
             IzgradiIzgled();
-            lblDobrodosli.Text = "Dobrodošli, " + Sesija.Ime + "!";
+            lblDobrodosli.Text = "Dobrodošao, " + Sesija.Ime + "!";
 
             dgvKnjige.ReadOnly = true;
             dgvKnjige.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
@@ -60,6 +63,32 @@ namespace biblioteka_vezba
             UcitajKnjige();
             UcitajMoje();
         }
+
+        // ------------------------------------------------------------------
+        // PROVERE (koriste se i u istoriji)
+        // ------------------------------------------------------------------
+
+        // broji pozajmice vracene nakon roka + one koje su nevracene a rok je prosao
+        public static int BrojKasnjenja(int korisnikId)
+        {
+            string sql = @"
+                SELECT COUNT(*) FROM pozajmice
+                WHERE korisnik_id = @korisnik
+                  AND ( (datum_vracanja IS NOT NULL AND datum_vracanja > rok_vracanja)
+                     OR (datum_vracanja IS NULL AND rok_vracanja < CURDATE()) )";
+
+            using (var conn = new MySqlConnection(Db.ConnStr))
+            using (var cmd = new MySqlCommand(sql, conn))
+            {
+                cmd.Parameters.AddWithValue("@korisnik", korisnikId);
+                conn.Open();
+                return Convert.ToInt32(cmd.ExecuteScalar());
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // IZGLED
+        // ------------------------------------------------------------------
 
         private void IzgradiIzgled()
         {
@@ -256,6 +285,28 @@ namespace biblioteka_vezba
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Left
             };
 
+            // link koji otvara celu istoriju
+            var lnkIstorija = new LinkLabel
+            {
+                Text = "Istorija pozajmica →",
+                AutoSize = false,
+                Size = new Size(190, 24),
+                TextAlign = ContentAlignment.MiddleRight,
+                Location = new Point(604, 404),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+                LinkColor = Color.FromArgb(11, 80, 160),
+                ActiveLinkColor = Navy,
+                VisitedLinkColor = Color.FromArgb(11, 80, 160),
+                LinkBehavior = LinkBehavior.HoverUnderline,
+                BackColor = Color.Transparent,
+                Font = new Font("Segoe UI", 10.5f)
+            };
+            lnkIstorija.LinkClicked += (s, e) =>
+            {
+                using (var f = new FrmIstorija())
+                    f.ShowDialog(this);
+            };
+
             dgvMoje = new DataGridView
             {
                 Location = new Point(18, 432),
@@ -287,8 +338,13 @@ namespace biblioteka_vezba
             dgvMoje.RowTemplate.Height = 30;
 
             pnlGlavni.Controls.Add(lbl);
+            pnlGlavni.Controls.Add(lnkIstorija);
             pnlGlavni.Controls.Add(dgvMoje);
         }
+
+        // ------------------------------------------------------------------
+        // PODACI
+        // ------------------------------------------------------------------
 
         private void UcitajKategorije()
         {
@@ -406,6 +462,10 @@ namespace biblioteka_vezba
         private void txtPretraga_TextChanged(object sender, EventArgs e) { UcitajKnjige(); }
         private void cmbKategorija_SelectedIndexChanged(object sender, EventArgs e) { UcitajKnjige(); }
 
+        // ------------------------------------------------------------------
+        // AKCIJE
+        // ------------------------------------------------------------------
+
         private void btnPozajmi_Click(object sender, EventArgs e)
         {
             if (dgvKnjige.CurrentRow == null)
@@ -415,20 +475,54 @@ namespace biblioteka_vezba
             }
 
             int knjigaId = Convert.ToInt32(dgvKnjige.CurrentRow.Cells["id"].Value);
-
-            string sql = @"
-                INSERT INTO pozajmice (korisnik_id, knjiga_id, datum_pozajmice, rok_vracanja)
-                SELECT @korisnik, @knjiga, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 14 DAY)
-                FROM knjige k
-                WHERE k.id = @knjiga
-                  AND k.kolicina > (SELECT COUNT(*) FROM pozajmice
-                                    WHERE knjiga_id = @knjiga AND datum_vracanja IS NULL)
-                  AND NOT EXISTS (SELECT 1 FROM pozajmice
-                                  WHERE knjiga_id = @knjiga AND korisnik_id = @korisnik
-                                    AND datum_vracanja IS NULL)";
+            string naslov = Convert.ToString(dgvKnjige.CurrentRow.Cells["Naslov"].Value);
 
             try
             {
+                // 1) provera kasnjenja
+                int kasnjenja = BrojKasnjenja(Sesija.Id);
+                if (kasnjenja >= MaxKasnjenja)
+                {
+                    MessageBox.Show(
+                        "Ne možeš da pozajmiš knjigu jer si kasnio sa vraćanjem " + kasnjenja +
+                        " puta, a dozvoljeno je manje od " + MaxKasnjenja + ".\n\nObrati se bibliotekaru.",
+                        "Pozajmljivanje blokirano", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // 2) provera da isti korisnik vec nema ovu knjigu kod sebe
+                int vecImas;
+                using (var conn = new MySqlConnection(Db.ConnStr))
+                using (var cmd = new MySqlCommand(
+                    @"SELECT COUNT(*) FROM pozajmice
+                      WHERE korisnik_id = @korisnik AND knjiga_id = @knjiga AND datum_vracanja IS NULL", conn))
+                {
+                    cmd.Parameters.AddWithValue("@korisnik", Sesija.Id);
+                    cmd.Parameters.AddWithValue("@knjiga", knjigaId);
+                    conn.Open();
+                    vecImas = Convert.ToInt32(cmd.ExecuteScalar());
+                }
+
+                if (vecImas > 0)
+                {
+                    MessageBox.Show(
+                        "Knjigu „" + naslov + "“ već imaš pozajmljenu. Prvo je vrati pa je možeš ponovo uzeti.",
+                        "Već pozajmljeno", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                // 3) upis, uslovi su ponovo u samom upitu da dva korisnika ne uzmu poslednji primerak
+                string sql = @"
+                    INSERT INTO pozajmice (korisnik_id, knjiga_id, datum_pozajmice, rok_vracanja)
+                    SELECT @korisnik, @knjiga, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 14 DAY)
+                    FROM knjige k
+                    WHERE k.id = @knjiga
+                      AND k.kolicina > (SELECT COUNT(*) FROM pozajmice
+                                        WHERE knjiga_id = @knjiga AND datum_vracanja IS NULL)
+                      AND NOT EXISTS (SELECT 1 FROM pozajmice
+                                      WHERE knjiga_id = @knjiga AND korisnik_id = @korisnik
+                                        AND datum_vracanja IS NULL)";
+
                 int upisano;
                 using (var conn = new MySqlConnection(Db.ConnStr))
                 using (var cmd = new MySqlCommand(sql, conn))
@@ -440,7 +534,7 @@ namespace biblioteka_vezba
                 }
 
                 if (upisano == 0)
-                    MessageBox.Show("Knjiga više nije dostupna ili je već imaš pozajmljenu.");
+                    MessageBox.Show("Knjiga više nije dostupna.");
                 else
                     MessageBox.Show("Pozajmljeno. Rok za vraćanje je 14 dana.");
 
@@ -505,6 +599,176 @@ namespace biblioteka_vezba
             Sesija.Ime = null;
             Sesija.Uloga = null;
             this.Close();
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // PROZOR SA ISTORIJOM POZAJMICA (pravi se iz koda, nema Designer fajl)
+    // ----------------------------------------------------------------------
+
+    public class FrmIstorija : Form
+    {
+        private static readonly Color Navy = Color.FromArgb(23, 43, 77);
+        private static readonly Color Krem = Color.FromArgb(242, 239, 233);
+        private static readonly Color Tamna = Color.FromArgb(28, 39, 51);
+        private static readonly Color Siva = Color.FromArgb(91, 104, 119);
+
+        private readonly DataGridView _grid;
+        private readonly Label _sazetak;
+
+        public FrmIstorija()
+        {
+            Text = "Istorija pozajmica";
+            ClientSize = new Size(860, 540);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterParent;
+            BackColor = Krem;
+            Font = new Font("Segoe UI", 10f);
+
+            var naslov = new Label
+            {
+                Text = "Istorija pozajmica",
+                Font = new Font("Georgia", 20f, FontStyle.Bold),
+                ForeColor = Tamna,
+                AutoSize = true,
+                Location = new Point(24, 18)
+            };
+
+            _sazetak = new Label
+            {
+                Font = new Font("Segoe UI", 11f),
+                ForeColor = Siva,
+                AutoSize = true,
+                Location = new Point(27, 62)
+            };
+
+            _grid = new DataGridView
+            {
+                Location = new Point(24, 100),
+                Size = new Size(812, 370),
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                AllowUserToResizeRows = false,
+                MultiSelect = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                BackgroundColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                GridColor = Color.FromArgb(208, 213, 221),
+                CellBorderStyle = DataGridViewCellBorderStyle.Single,
+                EnableHeadersVisualStyles = false,
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight = 36
+            };
+            _grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(221, 227, 238);
+            _grid.ColumnHeadersDefaultCellStyle.ForeColor = Tamna;
+            _grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Color.FromArgb(221, 227, 238);
+            _grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10.5f, FontStyle.Bold);
+            _grid.DefaultCellStyle.Font = new Font("Segoe UI", 10.5f);
+            _grid.DefaultCellStyle.Padding = new Padding(6, 0, 0, 0);
+            _grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(11, 107, 211);
+            _grid.DefaultCellStyle.SelectionForeColor = Color.White;
+            _grid.RowTemplate.Height = 32;
+
+            var btnZatvori = new RoundedButton
+            {
+                Text = "Zatvori",
+                Font = new Font("Segoe UI", 12f, FontStyle.Bold),
+                ForeColor = Color.White,
+                FillColor = Navy,
+                HoverColor = Color.FromArgb(35, 60, 105),
+                Location = new Point(686, 484),
+                Size = new Size(150, 42),
+                Radius = 10
+            };
+            btnZatvori.Click += (s, e) => Close();
+            CancelButton = btnZatvori;   // Esc zatvara prozor
+
+            Controls.Add(naslov);
+            Controls.Add(_sazetak);
+            Controls.Add(_grid);
+            Controls.Add(btnZatvori);
+
+            Ucitaj();
+        }
+
+        private void Ucitaj()
+        {
+            string sql = @"
+                SELECT k.naslov AS Naslov, k.autor AS Autor,
+                       p.datum_pozajmice AS Pozajmljeno, p.rok_vracanja AS Rok, p.datum_vracanja AS Vraceno,
+                       CASE
+                         WHEN p.datum_vracanja IS NULL AND p.rok_vracanja < CURDATE() THEN 'Kasni'
+                         WHEN p.datum_vracanja IS NULL THEN 'U roku'
+                         WHEN p.datum_vracanja > p.rok_vracanja THEN 'Vraćeno kasno'
+                         ELSE 'Vraćeno na vreme'
+                       END AS Status
+                FROM pozajmice p
+                JOIN knjige k ON k.id = p.knjiga_id
+                WHERE p.korisnik_id = @korisnik
+                ORDER BY p.datum_pozajmice DESC, p.id DESC";
+
+            try
+            {
+                var dt = new DataTable();
+                using (var conn = new MySqlConnection(Db.ConnStr))
+                using (var cmd = new MySqlCommand(sql, conn))
+                {
+                    cmd.Parameters.AddWithValue("@korisnik", Sesija.Id);
+                    new MySqlDataAdapter(cmd).Fill(dt);
+                }
+
+                _grid.DataSource = dt;
+                _grid.Columns["Rok"].HeaderText = "Rok vraćanja";
+                _grid.Columns["Vraceno"].HeaderText = "Vraćeno";
+                _grid.Columns["Pozajmljeno"].DefaultCellStyle.Format = "dd.MM.yyyy.";
+                _grid.Columns["Rok"].DefaultCellStyle.Format = "dd.MM.yyyy.";
+                _grid.Columns["Vraceno"].DefaultCellStyle.Format = "dd.MM.yyyy.";
+                _grid.Columns["Naslov"].FillWeight = 28;
+                _grid.Columns["Autor"].FillWeight = 20;
+                _grid.Columns["Pozajmljeno"].FillWeight = 14;
+                _grid.Columns["Rok"].FillWeight = 14;
+                _grid.Columns["Vraceno"].FillWeight = 14;
+                _grid.Columns["Status"].FillWeight = 18;
+
+                foreach (DataGridViewRow red in _grid.Rows)
+                {
+                    string status = Convert.ToString(red.Cells["Status"].Value);
+                    if (status == "Kasni")
+                    {
+                        red.DefaultCellStyle.BackColor = Color.MistyRose;
+                        red.DefaultCellStyle.ForeColor = Color.Firebrick;
+                    }
+                    else if (status == "Vraćeno kasno")
+                    {
+                        red.DefaultCellStyle.BackColor = Color.FromArgb(255, 243, 220);
+                        red.DefaultCellStyle.ForeColor = Color.FromArgb(160, 90, 0);
+                    }
+                    else if (status == "Vraćeno na vreme")
+                    {
+                        red.DefaultCellStyle.ForeColor = Siva;
+                    }
+                }
+
+                int kasnjenja = FrmKorisnik.BrojKasnjenja(Sesija.Id);
+                string tekst = "Ukupno pozajmica: " + dt.Rows.Count +
+                               "     |     Kašnjenja: " + kasnjenja + " (blokada pri " + FrmKorisnik.MaxKasnjenja + ")";
+
+                if (kasnjenja >= FrmKorisnik.MaxKasnjenja)
+                {
+                    tekst += "  –  pozajmljivanje je blokirano";
+                    _sazetak.ForeColor = Color.Firebrick;
+                }
+
+                _sazetak.Text = tekst;
+            }
+            catch (MySqlException ex)
+            {
+                MessageBox.Show("Greška sa bazom: " + ex.Message);
+            }
         }
     }
 }
